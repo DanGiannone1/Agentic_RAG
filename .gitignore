@@ -236,3 +236,6 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+tracing.py
+scripts/auxilium_doc_metadata.json
+scripts/document_metadata.json

@@ -24,6 +24,7 @@ aoai_key = os.getenv("AOAI_KEY")
 aoai_endpoint = os.getenv("AOAI_ENDPOINT")
 
 search_client = SearchClient(ai_search_endpoint, ai_search_index, AzureKeyCredential(ai_search_key))
+print("Index: ", ai_search_index)
 
 MAX_ATTEMPTS = 3
 NUM_SEARCH_RESULTS = 5
@@ -45,7 +46,7 @@ class ReviewDecision(BaseModel):
     decision: Literal["retry", "finalize"]
 
 class SearchPromptResponse(BaseModel):
-    """Schema for search prompt response"""
+    """Schema for search prompt responses"""
     search_query: str
     filter: str | None
 
@@ -60,6 +61,7 @@ class ChatState(TypedDict):
     decisions: List[str]  # Store the actual decisions
     final_answer: str | None
     attempts: int  # Track number of search attempts
+    search_history: List[Dict[str, Any]]  # Track previous search queries and filters
 
 # LLM Setup
 llm = AzureChatOpenAI(
@@ -97,8 +99,8 @@ def format_search_results(results: List[SearchResult]) -> str:
             f"\nResult #{i}",
             "=" * 80,
             f"ID: {result['id']}",
-            f"Source File: {result['sourceFileName']}",
-            f"Source Pages: {result['sourcePages']}",
+            f"Source File: {result['source_file']}",
+            f"Source Pages: {result['source_pages']}",
             "\n<Start Content>",
             "-" * 80,
             result['content'],
@@ -106,23 +108,43 @@ def format_search_results(results: List[SearchResult]) -> str:
             "<End Content>"
         ]
         output_parts.extend(result_parts)
+        
     
     # Join all parts with newlines
     formatted_output = "\n".join(output_parts)
     
-    # For convenience, you can still print the results if needed
-    print(formatted_output)
+    # For debugging, print a truncated version to console
+    debug_parts = ["\n=== Search Results ==="]
+    for i, result in enumerate(results, 1):
+        content = result['content']
+        if len(content) > 250:
+            content = content[:247] + "..."
+            
+        debug_parts.extend([
+            f"\nResult #{i}",
+            "=" * 80,
+            f"ID: {result['id']}",
+            f"Source File: {result['source_file']}",
+            f"Source Pages: {result['source_pages']}",
+            "\n<Start Content>",
+            "-" * 80,
+            content,
+            "-" * 80,
+            "<End Content>"
+        ])
+    print("\n".join(debug_parts))
     
     return formatted_output
 
 @traceable(run_type="retriever", name="run_search")
-def run_search(search_query: str, processed_ids: Set[str]) -> List[SearchResult]:
+def run_search(search_query: str, processed_ids: Set[str], category_filter: str | None = None) -> List[SearchResult]:
     """
     Perform a search using Azure Cognitive Search with both semantic and vector queries.
     
     Args:
         search_query (str): The search query to use
         processed_ids (Set[str]): Set of already processed document IDs to exclude
+        category_filter (str | None): Optional OData filter for category filtering
         
     Returns:
         List[SearchResult]: List of search results
@@ -133,26 +155,32 @@ def run_search(search_query: str, processed_ids: Set[str]) -> List[SearchResult]
     vector_query = VectorizedQuery(
         vector=query_vector,
         k_nearest_neighbors=K_NEAREST_NEIGHBORS,
-        fields="contentVector"
+        fields="content_vector"
     )
     
-    # Create filter for excluding processed documents
-    filter_str = None
+    # Create filter combining processed_ids and category filter
+    filter_parts = []
+    
     if processed_ids:
         ids_string = ','.join(processed_ids)
-        filter_str = f"not search.in(id, '{ids_string}', ',')"
-    else:
-        filter_str = None
-
+        filter_parts.append(f"not search.in(id, '{ids_string}')")
     
+    if category_filter:
+        filter_parts.append(f"({category_filter})")
+    
+    # Combine filters with 'and' if both exist
+    filter_str = None
+    if filter_parts:
+        filter_str = " and ".join(filter_parts)
 
-    print(f"Filter string: {filter_str}")
+    print(f"Full Filter string: {filter_str}")
+    
     # Perform the search
     results = search_client.search(
         search_text=search_query,
         vector_queries=[vector_query],
         filter=filter_str,
-        select=["id", "content", "sourceFileName", "sourcePages"],
+        select=["id", "content", "source_file", "source_pages"],
         top=NUM_SEARCH_RESULTS
     )
     
@@ -162,13 +190,12 @@ def run_search(search_query: str, processed_ids: Set[str]) -> List[SearchResult]
         search_result = SearchResult(
             id=result["id"],
             content=result["content"],
-            sourceFileName=result["sourceFileName"],
-            sourcePages=result["sourcePages"],
+            source_file=result["source_file"],
+            source_pages=result["source_pages"],
             score=result["@search.score"]
         )
         search_results.append(search_result)
     
-
     return search_results
 
 def generate_search_query(state: ChatState) -> ChatState:
@@ -180,37 +207,50 @@ def generate_search_query(state: ChatState) -> ChatState:
     state["attempts"] += 1
     print(f"\nAttempt {state['attempts']} of {MAX_ATTEMPTS}")
     
-    query_prompt = """Generate a concise,focused search query based on the user's question and what we've learned from previous searches (if any). Try to structure your query to match what we would find in the actual text.
-    E.g. if the user asks "What is the company's revenue?", a good query might be "company revenue" or "company revenue 2024" or "company revenue 2024 Q1"
-
-    User Question: {user_input}
-
-    Previous Review Analysis:
-    {reviews}
+    # Import the query prompt from search_prompt.py
+    from search_prompt import query_prompt
     
-    Your task:
-    1. Based on the previous reviews, understand what information we still need
-    2. Generate a targeted search query to find the missing information
-    3. Return just the search query, nothing else
-    """
+    # Format search history and reviews together
+    search_history_formatted = ""
+    if state["search_history"]:
+        search_history_formatted = "\n###Search History###\n"
+        for i, (search, review) in enumerate(zip(state["search_history"], state["reviews"]), 1):
+            search_history_formatted += f"<Attempt {i}>\n"
+            search_history_formatted += f"   search_query: {search['query']}\n"
+            search_history_formatted += f"   filter: {search['filter']}\n"
+            search_history_formatted += f"   review: {review}\n"
     
+    llm_input = f"""User Question: {state['user_input']}
+
+{search_history_formatted}"""
+
     messages = [
         {"role": "system", "content": query_prompt},
-        {"role": "user", "content": query_prompt.format(
-            user_input=state["user_input"],
-            reviews="\n".join(state["reviews"])
-        )}
+        {"role": "user", "content": llm_input}
     ]
     
-    search_query = llm.invoke(messages).content
-    print(f"\nGenerated search query: {search_query}")
+    # Use structured output for the search query and filter
+    llm_with_search_prompt = llm.with_structured_output(SearchPromptResponse)
+    search_response = llm_with_search_prompt.invoke(messages)
+
+    # Check the search response
+    print(f"search_query: {search_response.search_query}")
+    print(f"filter: {search_response.filter}")
     
-    # Use the new search function
-    state["current_results"] = run_search(
-        search_query=search_query,
-        processed_ids=state["processed_ids"]
+    # Store the search query and filter in history
+    state["search_history"].append({
+        "query": search_response.search_query,
+        "filter": search_response.filter
+    })
+    
+    # Run the search with both query and filter
+    current_results = run_search(
+        search_query=search_response.search_query,
+        processed_ids=state["processed_ids"],
+        category_filter=search_response.filter
     )
     
+    state["current_results"] = current_results
     return state
 
 def review_results(state: ChatState) -> ChatState:
@@ -224,14 +264,13 @@ def review_results(state: ChatState) -> ChatState:
     1. User Question: The question the user asked
     2. Current Search Results: The results of the current search
     3. Previously Vetted Results: The results we've already vetted
-    4. Previous Reviews: The reviews we've already done
+    4. Previous Attempts: The previous search queries and filters
 
     Respond with:
-    1. thought_process: Your analysis of the results. What is relevant and what is not? Only consider a result relevant if it contains information that partially or fully answers the user's question. If we don't have enough information, be clear about what we are missing.
+    1. thought_process: Your analysis of the results. What is relevant and what is not? Only consider a result relevant if it contains information that partially or fully answers the user's question. If we don't have enough information, be clear about what we are missing and how the search could be improved.
     2. valid_results: List of indices (0-N) for useful results
     3. invalid_results: List of indices (0-N) for irrelevant results
     4. decision: Either "retry" if we need more info or "finalize" if we can answer the question
-
     """
     
     # Format the current results
@@ -239,6 +278,16 @@ def review_results(state: ChatState) -> ChatState:
     
     # Format the vetted results
     vetted_results_formatted = format_search_results(state["vetted_results"]) if state["vetted_results"] else "No previously vetted results."
+    
+    # Format search history and reviews together
+    search_history_formatted = ""
+    if state["search_history"]:
+        search_history_formatted = "\n###Search History###\n"
+        for i, (search, review) in enumerate(zip(state["search_history"], state["reviews"]), 1):
+            search_history_formatted += f"<Attempt {i}>\n"
+            search_history_formatted += f"   search_query: {search['query']}\n"
+            search_history_formatted += f"   filter: {search['filter']}\n"
+            search_history_formatted += f"   review: {review}\n"
     
     llm_input = """
     User Question: {question}
@@ -249,8 +298,8 @@ def review_results(state: ChatState) -> ChatState:
     Previously Vetted Results:
     {vetted_results}
     
-    Previous Reviews:
-    {reviews}
+    Previous Attempts:
+    {search_history}
     """
     
     messages = [
@@ -259,7 +308,7 @@ def review_results(state: ChatState) -> ChatState:
             question=state["user_input"],
             current_results=current_results_formatted,
             vetted_results=vetted_results_formatted,
-            reviews="\n".join(state["reviews"])
+            search_history=search_history_formatted
         )}
     ]
     
@@ -273,6 +322,7 @@ def review_results(state: ChatState) -> ChatState:
     # Update state based on review
     state["reviews"].append(review.thought_process)
     state["decisions"].append(review.decision)
+    
     # Add valid results to vetted_results
     for idx in review.valid_results:
         result = state["current_results"][idx]
@@ -388,7 +438,8 @@ if __name__ == "__main__":
             reviews=[],
             decisions=[],
             final_answer=None,
-            attempts=0
+            attempts=0,
+            search_history=[]
         )
         
         # Process query
