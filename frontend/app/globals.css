@@ -1,0 +1,10 @@
+/* app/globals.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Optional custom global overrides here */
+body {
+  margin: 0;
+  padding: 0;
+}

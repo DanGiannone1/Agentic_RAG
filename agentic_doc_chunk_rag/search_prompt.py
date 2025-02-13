@@ -1,6 +1,5 @@
 
-query_prompt = """Generate a concise,focused search query based on the user's question and what we've learned from previous searches (if any). Try to structure your query to match what we would find in the actual text.
-    E.g. if the user asks "What is the company's revenue?", a good query might be "company revenue" or "company revenue 2024" or "company revenue 2024 Q1"
+query_prompt = """Generate a search query based on the user's question and what we've learned from previous searches (if any). Your search query should be a paragraph of what you think you will find in the documents themselves.
 
 
     Your input will look like this: 
@@ -10,7 +9,7 @@ query_prompt = """Generate a concise,focused search query based on the user's qu
     Your task:
     1. Based on the previous reviews, understand what information we still need
     2. Consider the question, determine what category or categories the information belongs to based on the category guidance
-    3. Generate a targeted search query and a filterto find the missing information
+    3. Generate a paragraph of what you think you will find in the documents themselves
 
     ###Output Format###
 
@@ -21,47 +20,47 @@ query_prompt = """Generate a concise,focused search query based on the user's qu
 
     
     {
-    "CategoryName": "Proposal Boilerplate",
-    "Description": "This category includes general company information, capabilities, and standard content used in proposals",
+    "CategoryName": "home",
+    "Description": "This category includes general questions about Dan's house, 337 Goldman Drive",
     "SampleQuestions": [
-        "Why choose DXC?",
-        "Can you provide a brief overview of DXC Technology?",
-        "What is the history and background of DXC Technology?",
-        "What are the key industries and sectors DXC serves?",
-        "What are the primary services and solutions offered by DXC Technology?",
-        "How does DXC support digital transformation for its clients?",
-        "Can you describe DXC's approach to cloud and platform services?"
+        "What year was my house built?",
+        "What are the top 3 most important items from my home inspection?"
     ]
     },
-    "CategoryName": "Playbook",
-    "Description": "This category includes strategic guidance and methodologies for consulting and technical practices",
+    "CategoryName": "health",
+    "Description": "This category includes questions about Dan's health",
     "SampleQuestions": [
-        "What is DXC's consulting methodology?",
-        "What is DXC's approach to Data & AI?"
+        "What were my latest lab results"
     ]
     },
-    "CategoryName": "Brochure",
-    "Description": "This category includes product and service offering overviews",
+    "CategoryName": "finance",
+    "Description": "This category includes questions about Dan's finances",
     "SampleQuestions": [
-        "What are DXC's network offerings?",
-        "What products does DXC offer?",
-        "What are DXC's service capabilities?"
-    ]
-    },
-
-    "CategoryName": "Customer Presentation",
-    "Description": "This category includes customer-facing presentation materials about specific products or services",
-    "SampleQuestions": [
-        "What innovative AI projects has DXC completed?"
+        "What were my taxes in 2022?",
+        "How much mortgage interest did i pay last year?"
     ]
     }
 
     
     ###Example###
     
-    User Question: "What are the key regions where DXC operates?"
+    User Question: "What year was my house built?"
     Assistant: 
-    search_query: "dxc operating regions"
-    filter: "category eq 'Proposal Boilerplate'"
+    search_query: "the house was built in 2019"
+    filter: "category eq 'home'"
+
+    User Question: "How much mortgage interest did i pay last year?"
+    Assistant: 
+    search_query: " 1 Mortgage interest received from payer(s)/borrower(s)*
+      $1,000
+ Outstanding mortgage principal 
+$10,000
+ Refund of overpaid interest 
+$0.00
+ Mortgage origination date 
+11/29/2022
+ Mortgage insurance premiums 
+$100"
+    filter: "category eq 'finance'"
 
     """
