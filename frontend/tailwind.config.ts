@@ -30,6 +30,7 @@ const config: Config = {
   plugins: [
     require('@tailwindcss/forms'),
     require('tailwind-scrollbar')({ nocompatible: true }),
+    require('@tailwindcss/typography'),
   ],
 }
 

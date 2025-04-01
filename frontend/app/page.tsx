@@ -1,17 +1,19 @@
-/* app/page.tsx */
+/* frontend/app/page.tsx */
 "use client"
 
-import { useState, useRef, useEffect, FormEvent } from "react"
+import React, { useState, useRef, useEffect, FormEvent } from "react"
 import { Bot, Search, Sparkles, User, ArrowRight, Lightbulb } from "lucide-react"
 import { Button, Input, ScrollArea } from "@/components/ui"
 import { ThoughtProcess } from "@/components/thought_process"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 
 interface Citation {
   id: string
-  content: string
+  display_text: string
   source_file: string
   source_pages: number
-  score: number
+  reference_number?: number
 }
 
 interface Message {
@@ -29,23 +31,138 @@ const STATUS_MESSAGES = {
   ANALYZING: "Reviewing the documents...",
 } as const
 
+/**
+ * Parse citation tags from the raw text.
+ *
+ * For every occurrence of a citation tag like:
+ *
+ *    <cit>DXC Corporate FAQs.pdf - page 22</cit>
+ *
+ * we replace it with a numbered marker (e.g. [1]). If the same source
+ * (i.e. the same filename–page combo) appears more than once, we reuse the same number.
+ */
+const parseCitTags = (text: string) => {
+  const citRegex = /<cit>([^<]+)<\/cit>/g
+  const citations: Citation[] = []
+  const citationMap = new Map<string, number>()
+
+  const processedText = text.replace(citRegex, (_, displayText) => {
+    const cleanDisplay = displayText.trim()
+    if (citationMap.has(cleanDisplay)) {
+      return `[${citationMap.get(cleanDisplay)}]`
+    } else {
+      const refNumber = citations.length + 1
+      citationMap.set(cleanDisplay, refNumber)
+      // Expecting format: "filename - page {number}"
+      const parts = cleanDisplay.split("-")
+      const sourceFile = parts[0].trim()
+      const pageMatch = parts[1] ? parts[1].trim().match(/\d+/) : null
+      const source_pages = pageMatch ? parseInt(pageMatch[0], 10) : 0
+      citations.push({
+        id: cleanDisplay,
+        display_text: cleanDisplay,
+        source_file: sourceFile,
+        source_pages,
+        reference_number: refNumber,
+      })
+      return `[${refNumber}]`
+    }
+  })
+
+  return { processedText, citations }
+}
+
+/**
+ * Custom paragraph renderer for ReactMarkdown.
+ * Recursively processes text nodes to wrap citation markers in clickable links.
+ */
+const CustomParagraph = ({ children, ...props }: React.ComponentProps<'p'>) => {
+  const processNode = (node: React.ReactNode): React.ReactNode => {
+    // If the node is a string, process it for citations
+    if (typeof node === 'string') {
+      return node.split(/(\[\d+\])/g).map((part, i) => {
+        if (/^\[\d+\]$/.test(part)) {
+          const citationNumber = part.match(/\d+/)?.[0]
+          return (
+            <sup key={i}>
+              <a
+                href="#"
+                className="text-blue-400 hover:text-blue-300"
+                onClick={(e) => {
+                  e.preventDefault()
+                  handleCitationClick(citationNumber)
+                }}
+              >
+                {part}
+              </a>
+            </sup>
+          )
+        }
+        return part
+      })
+    }
+    
+    // If the node is an array, process each child
+    if (Array.isArray(node)) {
+      return node.map((child, i) => <React.Fragment key={i}>{processNode(child)}</React.Fragment>)
+    }
+    
+    // If the node is a React element, process its children
+    if (React.isValidElement(node)) {
+      const elementNode = node as React.ReactElement<{ children?: React.ReactNode }>
+      return React.cloneElement(elementNode, {
+        key: elementNode.key,
+        children: processNode(elementNode.props.children)
+      })
+    }
+    
+    // Return unchanged if none of the above
+    return node
+  }
+
+  return <p {...props}>{processNode(children)}</p>
+}
+
+/**
+ * Handler for citation clicks.
+ */
+const handleCitationClick = (citationNumber: string | undefined) => {
+  if (citationNumber) {
+    console.log("Citation clicked:", citationNumber)
+    alert(`Citation ${citationNumber} clicked.`)
+  }
+}
+
+/**
+ * Custom heading components for ReactMarkdown.
+ * Maps h1-h6 tags to appropriate Tailwind classes for styling.
+ */
+const CustomHeading = (level: 1 | 2 | 3 | 4 | 5 | 6) => {
+  const Tag = `h${level}` as const
+  return function Heading({ children, ...props }: React.ComponentProps<typeof Tag>) {
+    const sizeClasses = {
+      1: 'text-2xl font-bold mb-4',
+      2: 'text-xl font-semibold mb-3',
+      3: 'text-lg font-medium mb-2',
+      4: 'text-base font-medium mb-2',
+      5: 'text-sm font-medium mb-1',
+      6: 'text-sm font-medium mb-1'
+    }[level]
+
+    return React.createElement(Tag, { className: sizeClasses, ...props }, children)
+  }
+}
+
 export default function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
   const [isProcessing, setIsProcessing] = useState(false)
   const [isThoughtProcessOpen, setIsThoughtProcessOpen] = useState(false)
-  const [currentThoughtProcess, setCurrentThoughtProcess] = useState<Array<{ step: string; details: Record<string, any> }>>([])
-  const scrollRef = useRef<HTMLDivElement>(null)
-
-  // Auto-scroll effect
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTo({
-        top: scrollRef.current.scrollHeight,
-        behavior: "smooth"
-      })
-    }
-  }, [messages]) // Scroll whenever messages change
+  const [currentThoughtProcess, setCurrentThoughtProcess] = useState<
+    Array<{ step: string; details: Record<string, any> }>
+  >([])
+  // Buffer for the raw response text.
+  const [rawResponse, setRawResponse] = useState("")
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -54,20 +171,17 @@ export default function ChatInterface() {
     const userQuestion = input.trim()
     setInput("")
     setIsProcessing(true)
+    setRawResponse("") // Reset raw text for new query.
 
-    // Add user message
+    // Add user message.
     setMessages((prev) => [...prev, { type: "user", content: userQuestion }])
 
     try {
-      // SSE
       const query = encodeURIComponent(userQuestion)
-      const eventSource = new EventSource(
-        `http://localhost:5000/chat?user_input=${query}`,
-        { withCredentials: true }
-      )
+      const eventSource = new EventSource(`http://localhost:5000/chat?user_input=${query}`, {
+        withCredentials: true,
+      })
 
-      let responseText = ""
-      let currentCitations: Message["citations"] = []
       let currentThoughtProcess: Message["thought_process"] = []
 
       const safeParseJSON = (data: string) => {
@@ -79,31 +193,44 @@ export default function ChatInterface() {
         }
       }
 
+      // "retrieve" event: blue bubble.
       eventSource.addEventListener("retrieve", (e) => {
         const data = safeParseJSON(e.data)
         if (data?.message) {
-          setMessages((prev) => [
-            ...prev,
-            {
-              type: "status",
-              content: STATUS_MESSAGES.SEARCHING,
-              icon: "search",
-              color: "blue",
-            },
-          ])
+          setMessages((prev) => {
+            const newMessages = [...prev]
+            // Mark any previous retrieve/review messages as completed
+            newMessages.forEach(msg => {
+              if (msg.type === "status" && !msg.completed) {
+                msg.completed = true
+              }
+            })
+            return [
+              ...newMessages,
+              {
+                type: "status",
+                content: STATUS_MESSAGES.SEARCHING,
+                icon: "search",
+                color: "blue",
+                completed: false,
+              },
+            ]
+          })
         }
       })
 
+      // "review" event: purple bubble.
       eventSource.addEventListener("review", (e) => {
         const data = safeParseJSON(e.data)
         if (data?.message) {
           setMessages((prev) => {
             const newMessages = [...prev]
-            // Mark the previous status as completed if it exists
-            const lastMessage = newMessages[newMessages.length - 1]
-            if (lastMessage?.type === "status") {
-              lastMessage.completed = true
-            }
+            // Mark any previous retrieve/review messages as completed
+            newMessages.forEach(msg => {
+              if (msg.type === "status" && !msg.completed) {
+                msg.completed = true
+              }
+            })
             return [
               ...newMessages,
               {
@@ -118,54 +245,60 @@ export default function ChatInterface() {
         }
       })
 
+      // Accumulate streaming response.
       eventSource.addEventListener("response_chunk", (e) => {
         const data = safeParseJSON(e.data)
         if (data?.chunk) {
-          responseText += data.chunk
-          setMessages((prev) => {
-            const newMessages = [...prev]
-            // Mark the last status message as completed
-            const lastStatus = newMessages.findLast(m => m.type === "status")
-            if (lastStatus) {
-              lastStatus.completed = true
-            }
-            
-            const lastMsg = newMessages[newMessages.length - 1]
-            if (lastMsg && lastMsg.type === "assistant") {
-              lastMsg.content = responseText
-              lastMsg.citations = currentCitations
-              lastMsg.thought_process = currentThoughtProcess
-            } else {
-              newMessages.push({
-                type: "assistant",
-                content: responseText,
-                citations: currentCitations,
-                thought_process: currentThoughtProcess,
+          setRawResponse((prevRaw) => {
+            const newRaw = prevRaw + data.chunk
+            const { processedText, citations } = parseCitTags(newRaw)
+            setMessages((prev) => {
+              const newMessages = [...prev]
+              // Mark any previous retrieve/review messages as completed
+              newMessages.forEach(msg => {
+                if (msg.type === "status" && !msg.completed) {
+                  msg.completed = true
+                }
               })
-            }
-            return newMessages
+              
+              const lastMsg = prev.slice(-1)[0]
+              if (lastMsg && lastMsg.type === "assistant") {
+                lastMsg.content = processedText
+                lastMsg.citations = citations
+                return [...prev.slice(0, -1), lastMsg]
+              } else {
+                return [
+                  ...newMessages,
+                  {
+                    type: "assistant",
+                    content: processedText,
+                    citations,
+                    thought_process: currentThoughtProcess,
+                  },
+                ]
+              }
+            })
+            return newRaw
           })
         }
       })
 
+      // Final payload: update only the thought process (leave citations as parsed inline).
       eventSource.addEventListener("final_payload", (e) => {
         const data = safeParseJSON(e.data)
         if (data?.payload) {
-          const { citations, thought_process } = data.payload as {
+          const { thought_process } = data.payload as {
             citations: Citation[]
             thought_process: Array<{ step: string; details: Record<string, any> }>
           }
-          currentCitations = citations
           currentThoughtProcess = thought_process
-
           setMessages((prev) => {
-            const newMessages = [...prev]
-            const lastMessage = newMessages[newMessages.length - 1]
-            if (lastMessage?.type === "assistant") {
-              lastMessage.citations = citations
-              lastMessage.thought_process = thought_process
+            const lastMsg = prev.slice(-1)[0]
+            if (lastMsg && lastMsg.type === "assistant") {
+              lastMsg.thought_process = thought_process
+              return [...prev.slice(0, -1), lastMsg]
             }
-            return newMessages
+            return prev
           })
         }
       })
@@ -189,7 +322,7 @@ export default function ChatInterface() {
       })
 
       eventSource.onerror = (error) => {
-        console.error("EventSource failed:", error)
+        console.error("EventSource error:", error)
         setMessages((prev) => [
           ...prev,
           {
@@ -210,79 +343,94 @@ export default function ChatInterface() {
     }
   }
 
-  const renderCitations = (citations?: Citation[]) => {
-    if (!citations || citations.length === 0) return null
-    return (
-      <div className="mt-2 space-y-1 text-sm">
-        {citations.map((cite) => (
-          <div 
-            key={cite.id} 
-            className="text-blue-400 hover:text-blue-300 cursor-pointer inline-block mr-3"
-            title={cite.content}
-          >
-            {cite.source_file} (p.{cite.source_pages})
-          </div>
-        ))}
-      </div>
-    )
-  }
-
   return (
     <div className="flex flex-col items-center min-h-screen w-full bg-zinc-900 text-zinc-100">
       {/* Header */}
       <header className="my-6 text-center">
-        <h1 className="text-2xl font-semibold">Agentic RAG Chat</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Agentic RAG Chat</h1>
       </header>
 
       {/* Main chat area */}
       <div className="w-full max-w-4xl flex-1 px-4 pb-2">
-        <ScrollArea ref={scrollRef} className="h-[calc(100vh-10rem)]">
+        <ScrollArea className="h-[calc(100vh-10rem)]">
           <div className="space-y-4 pt-2">
             {messages.map((message, index) => {
               const isUser = message.type === "user"
               const isStatus = message.type === "status"
-
               const alignmentClass = isUser ? "justify-end" : "justify-start"
 
-              let bubbleClass = "bg-zinc-800 border border-zinc-700"
+              // For status messages, reapply color-based styling.
+              let bubbleClass = isUser
+                ? "bg-zinc-800/70 border border-zinc-600/50 shadow-sm"
+                : "bg-zinc-800/90 border border-zinc-700/90 shadow-sm"
               if (isStatus) {
-                const statusBase = message.color === "blue"
-                  ? "border-blue-700"
-                  : "border-purple-700"
-                
+                const statusBase = message.color === "blue" ? "border-blue-700/80" : "border-purple-700/80"
                 const statusState = message.completed
-                  ? "bg-zinc-800/30 opacity-75"
-                  : `${message.color === "blue" ? "bg-blue-900/30" : "bg-purple-900/30"} animate-fade-in relative overflow-hidden before:absolute before:inset-0 before:bg-gradient-to-r before:from-transparent before:via-white/5 before:to-transparent before:animate-shimmer`
-                
+                  ? "bg-zinc-800/20 opacity-75"
+                  : message.color === "blue"
+                  ? "bg-blue-900/20 animate-fade-in"
+                  : "bg-purple-900/20 animate-fade-in"
                 bubbleClass = `${statusBase} ${statusState}`
               }
 
-              // Icon logic
+              // Select appropriate icon.
               let iconEl = null
               if (isUser) {
-                iconEl = <User className="w-5 h-5 text-zinc-200" />
+                iconEl = <User className="w-5 h-5 text-blue-400/90" />
               } else if (isStatus) {
                 iconEl =
                   message.icon === "search" ? (
-                    <Search className={`w-5 h-5 text-blue-400 ${!message.completed && 'animate-pulse'}`} />
+                    <Search className={`w-5 h-5 text-blue-400 ${!message.completed && "animate-pulse"}`} />
                   ) : (
-                    <Sparkles className={`w-5 h-5 text-purple-400 ${!message.completed && 'animate-pulse'}`} />
+                    <Sparkles className={`w-5 h-5 text-purple-400 ${!message.completed && "animate-pulse"}`} />
                   )
               } else {
-                iconEl = <Bot className="w-5 h-5 text-zinc-300" />
+                iconEl = <Bot className="w-5 h-5 text-blue-400/90" />
               }
 
               return (
                 <div key={index} className={`flex w-full ${alignmentClass}`}>
                   <div
-                    className={`p-3 rounded-lg max-w-xl flex items-start gap-2 text-sm ${bubbleClass} ${
-                      isUser ? "rounded-tr-none" : "rounded-tl-none"
-                    } relative ${!isUser && message.thought_process ? 'pr-12' : ''}`}
+                    className={`${bubbleClass} p-3 rounded-lg max-w-xl flex items-start gap-2.5 text-sm relative backdrop-blur-sm ${
+                      isUser ? "rounded-br-none" : "rounded-bl-none"
+                    }`}
                   >
                     {iconEl}
-                    <div className="flex-1 leading-normal whitespace-pre-wrap">
-                      {message.content}
-                      {!isStatus && renderCitations(message.citations)}
+                    <div className="flex-1 leading-relaxed whitespace-pre-wrap pr-12">
+                      {isStatus ? (
+                        <span className="text-zinc-300">{message.content}</span>
+                      ) : (
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            p: CustomParagraph,
+                            h1: CustomHeading(1),
+                            h2: CustomHeading(2),
+                            h3: CustomHeading(3),
+                            h4: CustomHeading(4),
+                            h5: CustomHeading(5),
+                            h6: CustomHeading(6)
+                          }}
+                        >
+                          {message.content}
+                        </ReactMarkdown>
+                      )}
+                      {/* Render citation list below the message */}
+                      {!isStatus && message.citations && message.citations.length > 0 && (
+                        <div className="mt-3 pt-3 border-t border-zinc-700/40 flex flex-wrap gap-2 text-sm text-blue-400/90">
+                          {message.citations.map((cite, idx) => (
+                            <div
+                              key={cite.id}
+                              className="hover:text-blue-300 cursor-pointer transition-colors duration-150"
+                              title={cite.display_text}
+                              onClick={() => handleCitationClick(String(idx + 1))}
+                            >
+                              <span className="text-xs">[{idx + 1}]</span>{" "}
+                              {cite.display_text}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                     {message.thought_process && (
                       <button
@@ -290,10 +438,10 @@ export default function ChatInterface() {
                           setCurrentThoughtProcess(message.thought_process || [])
                           setIsThoughtProcessOpen(true)
                         }}
-                        className="absolute top-3 right-3 p-1 rounded-full bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 hover:text-blue-300 transition-all transform hover:scale-110"
+                        className="absolute top-3 right-3 p-1.5 rounded-full bg-blue-500/10 hover:bg-blue-500/20 text-blue-400/90 transition-all transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
                         title="View thought process"
                       >
-                        <Lightbulb className="w-6 h-6" />
+                        <Lightbulb className="w-5 h-5" />
                       </button>
                     )}
                   </div>
@@ -304,12 +452,10 @@ export default function ChatInterface() {
         </ScrollArea>
       </div>
 
-      {/* Bottom input bar */}
+      {/* Bottom input area */}
       <div className="w-full max-w-4xl px-4 pb-6">
         <form onSubmit={handleSubmit} className="relative">
-          {/* The big 'pill' container */}
           <div className="relative flex items-center w-full rounded-full bg-zinc-800 border border-zinc-700 shadow-sm px-5 py-3">
-            {/* Enough right padding so text doesn't collide with arrow */}
             <Input
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -317,8 +463,6 @@ export default function ChatInterface() {
               disabled={isProcessing}
               className="flex-1 bg-transparent border-0 focus:ring-0 focus:outline-none pr-12 px-0"
             />
-
-            {/* The arrow button is absolutely placed at right */}
             <Button
               type="submit"
               variant="circle"

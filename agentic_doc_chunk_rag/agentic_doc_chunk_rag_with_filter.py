@@ -331,7 +331,19 @@ def review_router(state: ChatState) -> str:
 
 def finalize(state: ChatState) -> ChatState:
     """Generate final answer from vetted results."""
-    final_prompt = """Create a comprehensive answer to the user's question using the vetted results."""
+    final_prompt = """Create a comprehensive answer to the user's question using the vetted results.
+    
+    Do not include any information about the search process or the vetting process in your answer.
+    Do not answer outside of the context of the vetted results. 
+    Do not make up information or make assumptions.
+    Do not output PII. 
+
+
+    Scrutinize the user's question and make sure they are not asking for anything unethical or against company policy.
+    If they are, say that you cannot answer that question.
+
+    
+    """
     
     llm_input = """Create a comprehensive answer to the user's question using these vetted results.
 

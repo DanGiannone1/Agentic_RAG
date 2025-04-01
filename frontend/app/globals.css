@@ -8,3 +8,20 @@ body {
   margin: 0;
   padding: 0;
 }
+
+/* Resize handle styles */
+.resize-handle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  cursor: ew-resize;
+  background: transparent;
+  transition: background-color 0.2s;
+}
+
+.resize-handle:hover,
+.resize-handle:active {
+  background-color: rgba(59, 130, 246, 0.5);
+}

@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import os
 from langgraph.graph import StateGraph, START, END  # Not used in this refactor.
 from langsmith import traceable
+from langsmith.run_helpers import get_current_run_tree
 
 load_dotenv()
 
@@ -218,7 +219,12 @@ Your input will contain the following information:
 4. Previous Attempts: The previous search queries and filters
 
 Respond with:
-1. thought_process: Your analysis of the results. Is this a general or specific question? Which chunks are relevant and which are not? Only consider a result relevant if it contains information that partially or fully answers the user's question. If we don't have enough information, be clear about what we are missing and how the search could be improved. End by saying whether we will answer or keep looking.
+1. thought_process: touch on each of the following points...
+    a. Is this a general or specific question? 
+    b. Which chunks are relevant and which are not? Only consider a result relevant if it contains information that partially or fully answers the user's question. 
+    c. If we don't have enough information, be clear about what we are missing and how the search could be improved. 
+    d. Could the answer be improved by looking for more documents? 
+    e. Based on the above, state your intention to keep looking or to finalize & proceed to the final response step. If the answer could be improved by looking for more information, say "retry".
 2. valid_results: List of indices (0-N) for useful results
 3. invalid_results: List of indices (0-N) for irrelevant results
 4. decision: Either "retry" if we need more info or "finalize" if we can answer the question
@@ -232,7 +238,7 @@ If the user asks a very specific question, such as for an example of a specific 
 
 For General Questions:
 If the user asks a general question, consider all chunks with semi-relevant information to be valid. Our goal is to compile a comprehensive answer to the user's question.
-Consider making multiple attempts for these type of questions even if we find valid chunks on the first pass. We want to try to gather as much information as possible and form a comprehensive answer.
+Consider making multiple attempts for these type of questions even if we find valid chunks on the first pass. We want to try to gather as much information as possible and form a comprehensive answer, so if the answer could possible be improved by looking for more information, make another attempt. 
 """
 
 
@@ -321,20 +327,42 @@ def finalize(state: ChatState) -> Generator[Dict[str, Any], None, ChatState]:
     """
     final_prompt = """Create a comprehensive answer to the user's question using the vetted results."""
     
+    # Format vetted results in the same way as review node
+    vetted_results_formatted = "\n=== Vetted Results ===\n"
+    for i, result in enumerate(state["vetted_results"], 0):
+        result_parts = [
+            f"\nResult #{i}",
+            "=" * 80,
+            f"ID: {result['id']}",
+            f"Source File: {result['source_file']}",
+            f"Source Pages: {result['source_pages']}",
+            "\n<Start Content>",
+            "-" * 80,
+            result['content'],
+            "-" * 80,
+            "<End Content>"
+        ]
+        vetted_results_formatted += "\n".join(result_parts)
+    
     llm_input = """Create a comprehensive answer to the user's question using these vetted results.
 
 User Question: {question}
 
-Vetted Results:
 {vetted_results}
 
-Synthesize these results into a clear, complete answer. If there were no vetted results, say you couldn't find any relevant information to answer the question."""
+Synthesize these results into a clear, complete answer. If there were no vetted results, say you couldn't find any relevant information to answer the question.
+
+Guidance:
+- Always use valid markdown syntax. Try to use level 1 or level 2 headers for your sections. 
+- Cite your sources using the following format: some text <cit>file name - page number</cit> , some more text <cit>file name - page number> , etc.
+- Only cite sources that are actually used in the answer.
+"""
     
     messages = [
         {"role": "system", "content": final_prompt},
         {"role": "user", "content": llm_input.format(
             question=state["user_input"],
-            vetted_results="\n".join([f"- {r['content']}" for r in state["vetted_results"]])
+            vetted_results=vetted_results_formatted
         )}
     ]
     

@@ -1,6 +1,6 @@
 
-query_prompt = """Generate a search query based on the user's question and what we've learned from previous searches (if any). Your search query should be a paragraph of what you think you will find in the documents themselves.
-
+query_prompt = """Generate "search text" based on the user's question and what we've learned from previous searches (if any). Your search text should be a paragraph of what you think you will find in the documents themselves. Basically, take your best guess at what the content the user is searching for will look/sound like.
+We are using a process called Hypothetical Document Embedding (HyDe) to retrieve the most relevant documents for the users input. HyDe takes advantage of vector embeddings by making sure our search text is similar to the target document chunk in the vector space.
 
     Your input will look like this: 
         User Question: <user question>
@@ -9,12 +9,14 @@ query_prompt = """Generate a search query based on the user's question and what 
     Your task:
     1. Based on the previous reviews, understand what information we still need
     2. Consider the question, determine what category or categories the information belongs to based on the category guidance
-    3. Generate a paragraph of what you think you will find in the documents themselves
+    3. Generate a hypothetical paragraph or few sentences of what we are looking for in the documents
 
     ###Output Format###
 
-    1. search_query: The generated search query
-    2. filter: The filter to use with the search query (Azure AI Search OData syntax)
+    1. search_query: The generated search text
+    2. filter: The filter to use with the search text (Azure AI Search OData syntax)
+
+    IMPORTANT - generate the hypothetical search text as instructed. DO NOT GENERATE A STANDARD KEYWORD-BASED SEARCH QUERY. 
 
     ###Category Guidance###
 

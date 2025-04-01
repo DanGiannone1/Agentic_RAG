@@ -7,7 +7,7 @@ from flask_cors import CORS
 from agentic_doc_chunk_rag_v2 import graph_invoke, ChatState
 
 app = Flask(__name__)
-CORS(app, supports_credentials=True, origins=["http://localhost:3001"])
+CORS(app, supports_credentials=True, origins=["http://localhost:3000"])
 
 def stream_chat_response(user_input: str):
     """Generator that runs the agent graph in a background thread and yields SSE events."""
